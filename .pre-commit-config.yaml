@@ -1,0 +1,32 @@
+# .pre-commit-config.yaml
+# Документация: https://pre-commit.com
+
+repos:
+  # Базовые хуки от pre-commit
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace        # удаление пробелов в конце строк
+      - id: end-of-file-fixer          # пустая строка в конце файла
+      - id: check-added-large-files    # проверка размера файлов
+        args: [--maxkb=500]
+      - id: check-json                 # валидация JSON
+      - id: check-yaml                 # валидация YAML
+        exclude: .gitlab-ci.yml
+      - id: check-toml                 # валидация TOML
+      - id: detect-private-key         # поиск приватных ключей
+
+  # Ruff - быстрый линтер и форматтер для Python
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # Gitleaks - поиск секретов в коде
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.0
+    hooks:
+      - id: gitleaks
+        args: ["protect", "--staged", "--verbose"]
