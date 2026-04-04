@@ -11,17 +11,18 @@ app = FastAPI(
 
 @app.get("/")
 async def root() -> Dict[str, str]:
-    """Корневой эндпоинт"""
     return {"message": "Hello World"}
 
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
-    """Эндпоинт для проверки здоровья сервера"""
     return {"status": "ok"}
 
 
 @app.get("/hello/{name}")
 async def hello_name(name: str) -> Dict[str, str]:
-    """Эндпоинт с параметром в пути"""
     return {"message": f"Hello, {name}!"}
+
+@app.post("/hello/{name}")
+async def create_name(name: str) -> Dict[str, str]:
+    return {"message": f"{name} created"}
