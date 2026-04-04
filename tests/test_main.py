@@ -96,7 +96,7 @@ class TestNames:
     def test_get_names_returns_expected_data(self):
         response = client.post("/names")
         assert response.status_code == 200
-        assert response.json() == {1: "John", 2: "Ivan"}
+        assert response.json() == {"1": "John", "2": "Ivan"}
 
     def test_get_names_returns_integer_keys(self):
         response = client.post("/names")
@@ -107,8 +107,8 @@ class TestNames:
     def test_get_names_returns_string_values(self):
         response = client.post("/names")
         data = response.json()
-        assert isinstance(data[1], str)
-        assert isinstance(data[2], str)
+        assert isinstance(data["1"], str)
+        assert isinstance(data["2"], str)
 
     def test_get_names_method_not_allowed(self):
         response = client.get("/names")
