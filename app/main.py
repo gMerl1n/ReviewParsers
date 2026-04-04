@@ -30,8 +30,8 @@ async def create_name(name: str) -> Dict[str, str]:
 
 
 @app.post("/names")
-async def get_names() -> Dict[int, str]:
+async def get_names() -> Dict[str, str]:
     return {
-        1: "John",
-        2: "Ivan",
+        "1": "John",
+        "2": "Ivan",
     }
