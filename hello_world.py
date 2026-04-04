@@ -27,3 +27,11 @@ async def hello_name(name: str) -> Dict[str, str]:
 @app.post("/hello/{name}")
 async def create_name(name: str) -> Dict[str, str]:
     return {"message": f"{name} created"}
+
+
+@app.post("/names")
+async def get_names() -> Dict[int, str]:
+    return {
+        1: "John",
+        2: "Ivan",
+    }
