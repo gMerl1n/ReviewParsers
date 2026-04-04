@@ -5,7 +5,7 @@ from typing import Dict
 app = FastAPI(
     title="Hello World API",
     description="Простой FastAPI сервер с ручкой hello world",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 
@@ -22,6 +22,7 @@ async def health() -> Dict[str, str]:
 @app.get("/hello/{name}")
 async def hello_name(name: str) -> Dict[str, str]:
     return {"message": f"Hello, {name}!"}
+
 
 @app.post("/hello/{name}")
 async def create_name(name: str) -> Dict[str, str]:
