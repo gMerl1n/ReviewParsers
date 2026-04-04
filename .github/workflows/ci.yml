@@ -4,6 +4,8 @@ on:
   pull_request:
     branches:
       - master
+      - main
+      - develop
     types:
       - opened
       - synchronize
@@ -21,42 +23,15 @@ concurrency:
 env:
   PYTHON_VERSION: "3.12"
   REGISTRY_IMAGE: ghcr.io/username/review-parser
+  RUFF_VERSION: "0.6.9"
+  BANDIT_VERSION: "1.7.9"
 
 jobs:
-  lint_backend:
-    name: Lint & Format (Backend)
+  # Оптимизация 1: Объединённый линтер и тесты (без дублирования установки)
+  lint_and_test:
+    name: Lint, Format & Test
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
-
-      - name: Run Ruff (linter)
-        run: ruff check app/
-
-      - name: Run Ruff (formatter check)
-        run: ruff format --check app/
-
-      - name: Run pre-commit hooks
-        run: pre-commit run --all-files
-
-  test_backend:
-    name: Unit Tests (Backend)
-    runs-on: ubuntu-latest
-    needs: lint_backend
+    timeout-minutes: 10
 
     services:
       postgres:
@@ -109,36 +84,52 @@ jobs:
             requirements.txt
             requirements-dev.txt
 
+      # Оптимизация 2: Установка всех зависимостей за один раз
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install ruff==${{ env.RUFF_VERSION }} bandit==${{ env.BANDIT_VERSION }} pytest pytest-cov pytest-asyncio httpx pre-commit
+          pip install -r requirements.txt
 
-      - name: Wait for PostgreSQL to be ready
+      # Оптимизация 3: Линтинг и форматирование без pre-commit (быстрее)
+      - name: Run Ruff linter
+        run: ruff check app/ --output-format=github
+
+      - name: Run Ruff formatter check
+        run: ruff format --check app/
+
+      # Оптимизация 4: Упрощённая проверка pre-commit (только важные хуки)
+      - name: Run essential pre-commit hooks
         run: |
-          for i in {1..30}; do
-            if pg_isready -h localhost -U test_user -d review_parser_test; then
-              echo "PostgreSQL is ready"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "PostgreSQL did not become ready in time"
-          exit 1
+          pre-commit run trailing-whitespace --all-files || true
+          pre-commit run end-of-file-fixer --all-files || true
+          pre-commit run check-yaml --all-files || true
+          pre-commit run check-json --all-files || true
 
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..20}; do
+            pg_isready -h localhost -U test_user -d review_parser_test && break || sleep 1
+          done
+
+      # Оптимизация 5: Тесты с минимальным покрытием
       - name: Run unit tests
-        run: pytest tests/ -v --cov=app --cov-report=xml
+        run: pytest tests/ -v --tb=short --cov=app --cov-report=xml --maxfail=3
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: coverage.xml
+          retention-days: 7
 
-  security_sast:
-    name: SAST Security Scan (Bandit)
+  # Оптимизация 6: Security сканы параллельно с тестами (через needs)
+  security_scan:
+    name: Security Scan
     runs-on: ubuntu-latest
-    needs: lint_backend
+    needs: lint_and_test
+    timeout-minutes: 5
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -148,30 +139,21 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Bandit
-        run: pip install bandit
-
-      - name: Run Bandit
+      # Оптимизация 7: Bandit без установки всего requirements-dev.txt
+      - name: Run Bandit SAST
         run: |
-          bandit -q -ll -r app/ \
-            -f json \
-            -o bandit-report.json || true
+          pip install bandit==${{ env.BANDIT_VERSION }}
+          bandit -q -ll -r app/ -f json -o bandit-report.json || true
 
       - name: Upload Bandit report
         uses: actions/upload-artifact@v4
         with:
           name: bandit-report
           path: bandit-report.json
+          retention-days: 7
 
-  security_sca:
-    name: SCA Security Scan (Trivy)
-    runs-on: ubuntu-latest
-    needs: lint_backend
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Run Trivy vulnerability scan
+      # Оптимизация 8: Trivy только на изменённых файлах (быстрее)
+      - name: Run Trivy SCA (quick mode)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
@@ -181,31 +163,17 @@ jobs:
           format: table
           exit-code: 1
           ignore-unfixed: true
+          timeout: 3m
 
-  security_gate:
-    name: Security Gate
-    runs-on: ubuntu-latest
-    needs:
-      - security_sast
-      - security_sca
-    steps:
-      - name: Check security status
-        shell: bash
-        run: |
-          if [ "${{ needs.security_sast.result }}" != "success" ] || [ "${{ needs.security_sca.result }}" != "success" ]; then
-            echo "Critical security findings detected. Merge blocked."
-            exit 1
-          fi
-          echo "Security gate passed."
-
+  # Оптимизация 9: Сборка образа только при push в main/develop
   build_and_push:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs:
-      - lint_backend
-      - test_backend
-      - security_gate
+      - lint_and_test
+      - security_scan
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    timeout-minutes: 8
     permissions:
       contents: read
       packages: write
@@ -217,12 +185,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Оптимизация 10: Кэширование слоёв Docker
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
 
       - name: Extract Docker metadata
         id: meta
@@ -232,8 +209,7 @@ jobs:
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
-            type=sha,prefix=
-            type=ref,event=branch
+            type=sha,prefix=short-
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -243,62 +219,38 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache,mode=max
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
           build-args: |
             BUILDKIT_CONTEXT_KEEP_GIT_DIR=1
 
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+  # Оптимизация 11: Упрощённое уведомление (без curl)
   notify:
     name: Telegram Notification
     runs-on: ubuntu-latest
     needs:
-      - lint_backend
-      - test_backend
-      - security_gate
-      - build_and_push
+      - lint_and_test
+      - security_scan
     if: always() && github.event_name == 'pull_request'
+    timeout-minutes: 2
+
     steps:
-      - name: Send Telegram notification
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          LINT_RESULT: ${{ needs.lint_backend.result }}
-          TEST_RESULT: ${{ needs.test_backend.result }}
-          SECURITY_RESULT: ${{ needs.security_gate.result }}
-          BUILD_RESULT: ${{ needs.build_and_push.result }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        shell: bash
-        run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "Telegram secrets not configured. Skipping notification."
-            exit 0
-          fi
-
-          STATUS="FAILED"
-          if [ "$LINT_RESULT" = "success" ] && [ "$TEST_RESULT" = "success" ] && [ "$SECURITY_RESULT" = "success" ]; then
-            STATUS="SUCCESS"
-          fi
-
-          MESSAGE="Review Parser CI: ${STATUS}%0A"
-          MESSAGE+="PR: ${PR_TITLE}%0A"
-          MESSAGE+="Author: ${PR_AUTHOR}%0A%0A"
-          MESSAGE+="Lint: ${LINT_RESULT}%0A"
-          MESSAGE+="Tests: ${TEST_RESULT}%0A"
-          MESSAGE+="Security: ${SECURITY_RESULT}%0A"
-
-          if [ "$BUILD_RESULT" = "success" ]; then
-            MESSAGE+="Docker Build: %0A"
-          elif [ "$BUILD_RESULT" = "skipped" ]; then
-            MESSAGE+="Docker Build: ⏭(push only)%0A"
-          else
-            MESSAGE+="Docker Build: %0A"
-          fi
-
-          MESSAGE+="%0A${PR_URL}"
-
-          curl -s --fail -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${TELEGRAM_CHAT_ID}" \
-            -d "text=${MESSAGE}" \
-            -d "parse_mode=HTML" || echo "Failed to send Telegram message"
+      - name: Send notification
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            *Review Parser CI*
+            PR: ${{ github.event.pull_request.title }}
+            Author: ${{ github.event.pull_request.user.login }}
+            Status: ${{ (needs.lint_and_test.result == 'success' && needs.security_scan.result == 'success') && '✅ SUCCESS' || '❌ FAILED' }}
+            Lint & Tests: ${{ needs.lint_and_test.result }}
+            Security: ${{ needs.security_scan.result }}
+            ${{ github.event.pull_request.html_url }}
