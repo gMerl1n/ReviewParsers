@@ -1,17 +1,11 @@
 from fastapi import FastAPI
-from typing import Dict
+from typing import Dict, List
 
 # Создание экземпляра приложения
 app = FastAPI(
-    title="Hello World API",
-    description="Простой FastAPI сервер с ручкой hello world",
+    title=" API",
     version="1.0.0",
 )
-
-
-@app.get("/")
-async def root() -> Dict[str, str]:
-    return {"message": "Hello World"}
 
 
 @app.get("/health")
@@ -19,19 +13,15 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/hello/{name}")
-async def hello_name(name: str) -> Dict[str, str]:
-    return {"message": f"Hello, {name}!"}
+@app.get("/parse")
+async def parse() -> Dict[str, str]:
+    return {"message": "parser starting"}
 
-
-@app.post("/hello/{name}")
-async def create_name(name: str) -> Dict[str, str]:
-    return {"message": f"{name} created"}
-
-
-@app.post("/names")
-async def get_names() -> Dict[str, str]:
+@app.get("/reviews")
+async def parse() -> Dict[str, List[dict]]:
     return {
-        "1": "John",
-        "2": "Ivan",
+        "reviews": [
+            {"1": "review-1"},
+            {"2": "review-2"},
+        ]
     }
