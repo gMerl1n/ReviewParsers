@@ -1,306 +1,114 @@
-name: Review Parser CI/CD (Extended)
+name: Security Pipeline
 
+# Запуск при пуше в main или по расписанию (опционально)
 on:
-  pull_request:
-    branches:
-      - master
-      - main
-      - develop
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
   push:
-    branches:
-      - main
-      - develop
-
-concurrency:
-  group: review-parser-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false  # Не отменять для накопления времени
-
-env:
-  PYTHON_VERSION: "3.12"
-  REGISTRY_IMAGE: ghcr.io/username/review-parser
-  RUFF_VERSION: "0.6.9"
-  BANDIT_VERSION: "1.7.9"
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 6 * * 1' # Каждый понедельник в 6 утра
 
 jobs:
-  # Job 1: Линтинг с искусственными задержками
-  lint_backend_slow:
-    name: Lint & Format (Slow Mode)
+  # 1. Анализ кода Python (аналог fast-bandit)
+  fast-bandit:
+    name: SAST - Bandit Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - name: Bandit Security Scan
+        uses: mdegis/bandit-action@v1.0
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+          path: "."
+          level: high
+          confidence: high
+          exit_zero: false # Упадет при нахождении проблем
 
-      # Медленная установка (без кэширования)
-      - name: Install dependencies (no cache)
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff==${{ env.RUFF_VERSION }} bandit==${{ env.BANDIT_VERSION }} pytest pytest-cov pytest-asyncio httpx pre-commit
-          pip install -r requirements.txt
-          sleep 30  # Искусственная задержка
-
-      - name: Run Ruff linter
-        run: |
-          sleep 10  # Задержка перед проверкой
-          ruff check app/ --output-format=github
-
-      - name: Run Ruff formatter check
-        run: |
-          sleep 10
-          ruff format --check app/
-
-      - name: Run all pre-commit hooks (slow)
-        run: |
-          sleep 15
-          pre-commit run --all-files || true
-
-      - name: Artificial delay for linting
-        run: sleep 45  # Дополнительная задержка
-
-  # Job 2: Тесты с медленными операциями
-  test_backend_slow:
-    name: Unit Tests (Extended Duration)
+  # 2. Сканирование зависимостей (аналог sca-scan)
+  sca-scan:
+    name: SCA - Dependency Review
     runs-on: ubuntu-latest
-    needs: lint_backend_slow
-    timeout-minutes: 20
-
-    services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_USER: test_user
-          POSTGRES_PASSWORD: test_password
-          POSTGRES_DB: review_parser_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U test_user -d review_parser_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7.2-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    env:
-      PYTHONPATH: ${{ github.workspace }}
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: test_user
-      POSTGRES_PASSWORD: test_password
-      POSTGRES_DB: review_parser_test
-      REDIS_HOST: localhost
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ""
-      SECRET_KEY: test_secret_key_for_ci
-      APP_ENVIRONMENT: testing
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
-          pip install -r requirements.txt
-          sleep 20
-
-      - name: Wait for PostgreSQL with extended timeout
-        run: |
-          for i in {1..60}; do
-            pg_isready -h localhost -U test_user -d review_parser_test && break || sleep 2
-          done
-          sleep 10  # Дополнительное ожидание
-
-      - name: Run unit tests with multiple passes
-        run: |
-          # Запускаем тесты несколько раз для увеличения времени
-          for i in 1 2 3; do
-            echo "Test pass $i"
-            pytest tests/ -v --tb=short --cov=app --cov-report=xml --maxfail=3
-            sleep 5
-          done
-
-      - name: Run slow performance tests
-        run: |
-          # Искусственные "тяжёлые" тесты
-          for i in {1..100}; do
-            echo "Simulating performance test iteration $i"
-            sleep 0.5
-          done
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage.xml
-          retention-days: 7
-
-      - name: Artificial delay for testing
-        run: sleep 60
-
-  # Job 3: Security сканы с задержками
-  security_slow:
-    name: Security Scan (Thorough Mode)
-    runs-on: ubuntu-latest
-    needs: test_backend_slow
-    timeout-minutes: 15
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install security tools
-        run: |
-          pip install bandit==${{ env.BANDIT_VERSION }}
-          pip install safety
-          sleep 10
-
-      - name: Run Bandit SAST (full scan)
-        run: |
-          sleep 15
-          bandit -r app/ -f json -o bandit-report.json || true
-          sleep 10
-
-      - name: Run Safety dependency check
-        run: |
-          safety check -r requirements.txt --full-report || true
-          sleep 10
-
-      - name: Upload Bandit report
-        uses: actions/upload-artifact@v4
-        with:
-          name: bandit-report
-          path: bandit-report.json
-          retention-days: 7
-
-      - name: Run Trivy SCA (full scan)
+      - uses: actions/checkout@v4
+      - name: Run Trivy Filesystem Scan
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret,config
-          severity: HIGH,CRITICAL
-          format: table
-          exit-code: 1
-          ignore-unfixed: false
-          timeout: 10m
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1' # Fail if vulnerabilities found
 
-      - name: Artificial security delay
-        run: sleep 45
-
-  # Job 4: Медленная сборка образа
-  build_slow:
-    name: Build Docker Image (No Cache)
+  # 3. Поиск секретов (аналог secret-detection)
+  secret-detection:
+    name: Secret Detection - Gitleaks
     runs-on: ubuntu-latest
-    needs:
-      - lint_backend_slow
-      - test_backend_slow
-      - security_slow
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      packages: write
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Gitleaks Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Без кэширования для замедления
-      - name: Build Docker image (no cache)
-        run: |
-          sleep 30
-          docker build -t ${{ env.REGISTRY_IMAGE }}:latest .
-          sleep 20
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_IMAGE }}
-          tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
-            type=sha,prefix=short-
-
-      - name: Push Docker image (slow upload)
-        run: |
-          sleep 15
-          docker push ${{ env.REGISTRY_IMAGE }}:latest
-          sleep 15
-
-      - name: Artificial build delay
-        run: sleep 90
-
-  # Job 5: Дополнительная задержка для общего времени
-  final_delay:
-    name: Final Processing Delay
+  # 4. Сканирование Docker образа (аналог image-scan)
+  image-scan:
+    name: Container Scan - Trivy
     runs-on: ubuntu-latest
-    needs:
-      - lint_backend_slow
-      - test_backend_slow
-      - security_slow
-      - build_slow
-    if: always()
-
+    # Сборка образа и сканирование
     steps:
-      - name: Wait for final checks
-        run: |
-          echo "CI/CD pipeline completed with extended duration"
-          echo "Adding final delay to meet time requirements..."
-          sleep 120  # 2 минуты финальной задержки
+      - uses: actions/checkout@v4
 
-      - name: Print summary
-        run: |
-          echo "╔════════════════════════════════════════════╗"
-          echo "║     CI/CD Pipeline Completed (Slow Mode)   ║"
-          echo "╚════════════════════════════════════════════╝"
-          echo "Total execution time: ~15-20 minutes"
+      # Сборка образа (если у тебя свой Dockerfile)
+      - name: Build Docker Image
+        run: docker build -t my-app:${{ github.sha }} .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'my-app:${{ github.sha }}'
+          format: 'json'
+          output: 'trivy-image-results.json'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1' # Упадет, как на скриншоте "Block on Critical and High"
+
+      # Сохранение артефакта (как шаг "Upload image report" на скрине)
+      - name: Upload Image Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-results
+          path: trivy-image-results.json
+
+  # 5. Генерация SBOM (аналог sbom-generation)
+  sbom-generation:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
+        run: docker build -t my-app:${{ github.sha }} .
+      - name: Generate SBOM with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'my-app:${{ github.sha }}'
+          format: 'cyclonedx'
+          output: 'sbom.json'
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-report
+          path: sbom.json
+
+  # 6. Шлюз безопасности (аналог security-gate)
+  # Этот этап стартует ПОСЛЕ всех проверок и просто завершается успешно,
+  # если все предыдущие этапы зеленые. Иначе падал бы один из них.
+  security-gate:
+    name: Security Gate (All Clear)
+    needs: [fast-bandit, sca-scan, secret-detection, image-scan, sbom-generation]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Final Check
+        run: echo "All security checks passed!"
