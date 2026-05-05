@@ -1,4 +1,5 @@
-name: Review Parser CI/CD (Extended)
+# artifacts/.github/workflows/ci-security.yml
+name: Review Parser Security Pipeline
 
 on:
   pull_request:
@@ -17,105 +18,104 @@ on:
       - develop
 
 concurrency:
-  group: review-parser-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false  # Не отменять для накопления времени
+  group: review-parser-security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   PYTHON_VERSION: "3.12"
   REGISTRY_IMAGE: ghcr.io/username/review-parser
-  RUFF_VERSION: "0.6.9"
-  BANDIT_VERSION: "1.7.9"
 
 jobs:
-  # Job 1: Линтинг с искусственными задержками
-  lint_backend_slow:
-    name: Lint & Format (Slow Mode)
+  # Job 1: Secret Detection (runs first, blocks if secrets found)
+  secret-detection:
+    name: Secret Detection (Gitleaks)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (full history)
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+          fetch-depth: 0  # Full history for scanning all commits
 
-      # Медленная установка (без кэширования)
-      - name: Install dependencies (no cache)
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff==${{ env.RUFF_VERSION }} bandit==${{ env.BANDIT_VERSION }} pytest pytest-cov pytest-asyncio httpx pre-commit
-          pip install -r requirements.txt
-          sleep 30  # Искусственная задержка
-
-      - name: Run Ruff linter
-        run: |
-          sleep 10  # Задержка перед проверкой
-          ruff check app/ --output-format=github
-
-      - name: Run Ruff formatter check
-        run: |
-          sleep 10
-          ruff format --check app/
-
-      - name: Run all pre-commit hooks (slow)
-        run: |
-          sleep 15
-          pre-commit run --all-files || true
-
-      - name: Artificial delay for linting
-        run: sleep 45  # Дополнительная задержка
-
-  # Job 2: Тесты с медленными операциями
-  test_backend_slow:
-    name: Unit Tests (Extended Duration)
-    runs-on: ubuntu-latest
-    needs: lint_backend_slow
-    timeout-minutes: 20
-
-    services:
-      postgres:
-        image: postgres:15-alpine
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
         env:
-          POSTGRES_USER: test_user
-          POSTGRES_PASSWORD: test_password
-          POSTGRES_DB: review_parser_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U test_user -d review_parser_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          config-path: gitleaks.toml
+          report-path: artifacts/gitleaks-report.json
+          verbose: true
 
-      redis:
-        image: redis:7.2-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+      - name: Upload Gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: artifacts/gitleaks-report.json
+          retention-days: 30
 
-    env:
-      PYTHONPATH: ${{ github.workspace }}
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: test_user
-      POSTGRES_PASSWORD: test_password
-      POSTGRES_DB: review_parser_test
-      REDIS_HOST: localhost
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ""
-      SECRET_KEY: test_secret_key_for_ci
-      APP_ENVIRONMENT: testing
+      - name: Check for secrets in report
+        if: always()
+        run: |
+          if [ -f artifacts/gitleaks-report.json ]; then
+            SECRETS_COUNT=$(cat artifacts/gitleaks-report.json | python -c "import json,sys; data=json.load(sys.stdin); print(len(data))" 2>/dev/null || echo "0")
+            if [ "$SECRETS_COUNT" != "0" ]; then
+              echo "❌ Found $SECRETS_COUNT secrets in code!"
+              echo "Review the Gitleaks report artifact for details"
+              exit 1
+            else
+              echo "✅ No secrets found"
+            fi
+          fi
+
+  # Job 2: SCA - Software Composition Analysis (Trivy filesystem)
+  sca-scan:
+    name: SCA - Dependency Scan (Trivy FS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,config
+          severity: CRITICAL,HIGH
+          format: table
+          exit-code: 1
+          ignore-unfixed: false
+          timeout: 10m
+
+      - name: Save JSON report
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,config
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          format: json
+          exit-code: 0
+          output: artifacts/trivy-fs-report.json
+
+      - name: Upload Trivy FS report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: artifacts/trivy-fs-report.json
+          retention-days: 30
+
+  # Job 3: Linting and Formatting
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -126,40 +126,43 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install ruff
+
+      - name: Run Ruff linter
+        run: ruff check app/
+
+      - name: Run Ruff formatter check
+        run: ruff format --check app/
+
+  # Job 4: Unit Tests
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: [lint, sca-scan, secret-detection]
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          sleep 20
+          pip install pytest pytest-cov
 
-      - name: Wait for PostgreSQL with extended timeout
-        run: |
-          for i in {1..60}; do
-            pg_isready -h localhost -U test_user -d review_parser_test && break || sleep 2
-          done
-          sleep 10  # Дополнительное ожидание
-
-      - name: Run unit tests with multiple passes
-        run: |
-          # Запускаем тесты несколько раз для увеличения времени
-          for i in 1 2 3; do
-            echo "Test pass $i"
-            pytest tests/ -v --tb=short --cov=app --cov-report=xml --maxfail=3
-            sleep 5
-          done
-
-      - name: Run slow performance tests
-        run: |
-          # Искусственные "тяжёлые" тесты
-          for i in {1..100}; do
-            echo "Simulating performance test iteration $i"
-            sleep 0.5
-          done
+      - name: Run tests
+        run: pytest tests/ -v --tb=short --cov=app --cov-report=xml
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -168,74 +171,13 @@ jobs:
           path: coverage.xml
           retention-days: 7
 
-      - name: Artificial delay for testing
-        run: sleep 60
-
-  # Job 3: Security сканы с задержками
-  security_slow:
-    name: Security Scan (Thorough Mode)
+  # Job 5: Build Docker Image
+  build:
+    name: Build Docker Image
     runs-on: ubuntu-latest
-    needs: test_backend_slow
-    timeout-minutes: 15
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install security tools
-        run: |
-          pip install bandit==${{ env.BANDIT_VERSION }}
-          pip install safety
-          sleep 10
-
-      - name: Run Bandit SAST (full scan)
-        run: |
-          sleep 15
-          bandit -r app/ -f json -o bandit-report.json || true
-          sleep 10
-
-      - name: Run Safety dependency check
-        run: |
-          safety check -r requirements.txt --full-report || true
-          sleep 10
-
-      - name: Upload Bandit report
-        uses: actions/upload-artifact@v4
-        with:
-          name: bandit-report
-          path: bandit-report.json
-          retention-days: 7
-
-      - name: Run Trivy SCA (full scan)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret,config
-          severity: HIGH,CRITICAL
-          format: table
-          exit-code: 1
-          ignore-unfixed: false
-          timeout: 10m
-
-      - name: Artificial security delay
-        run: sleep 45
-
-  # Job 4: Медленная сборка образа
-  build_slow:
-    name: Build Docker Image (No Cache)
-    runs-on: ubuntu-latest
-    needs:
-      - lint_backend_slow
-      - test_backend_slow
-      - security_slow
+    needs: [test]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-    timeout-minutes: 20
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
@@ -247,19 +189,69 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.REGISTRY_IMAGE }}:${{ github.sha }} .
+
+  # Job 6: Image Scanning (Trivy)
+  image-scan:
+    name: Image Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    timeout-minutes: 15
+
+    steps:
+      - name: Scan Docker image with Trivy (Critical/High)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY_IMAGE }}:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          output: artifacts/trivy-image-report.txt
+
+      - name: Save JSON report
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY_IMAGE }}:${{ github.sha }}
+          format: json
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          exit-code: 0
+          output: artifacts/trivy-image-report.json
+
+      - name: Upload Trivy image report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: |
+            artifacts/trivy-image-report.txt
+            artifacts/trivy-image-report.json
+          retention-days: 30
+
+  # Job 7: Push to Registry (only if all checks pass)
+  push:
+    name: Push to Registry
+    runs-on: ubuntu-latest
+    needs: [image-scan]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Без кэширования для замедления
-      - name: Build Docker image (no cache)
-        run: |
-          sleep 30
-          docker build -t ${{ env.REGISTRY_IMAGE }}:latest .
-          sleep 20
 
       - name: Extract Docker metadata
         id: meta
@@ -271,36 +263,31 @@ jobs:
             type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
             type=sha,prefix=short-
 
-      - name: Push Docker image (slow upload)
+      - name: Tag and push Docker image
         run: |
-          sleep 15
+          docker tag ${{ env.REGISTRY_IMAGE }}:${{ github.sha }} ${{ env.REGISTRY_IMAGE }}:latest
           docker push ${{ env.REGISTRY_IMAGE }}:latest
-          sleep 15
 
-      - name: Artificial build delay
-        run: sleep 90
-
-  # Job 5: Дополнительная задержка для общего времени
-  final_delay:
-    name: Final Processing Delay
+  # Job 8: Generate SBOM
+  sbom-generation:
+    name: Generate SBOM
     runs-on: ubuntu-latest
-    needs:
-      - lint_backend_slow
-      - test_backend_slow
-      - security_slow
-      - build_slow
-    if: always()
+    needs: [sca-scan]
+    timeout-minutes: 5
 
     steps:
-      - name: Wait for final checks
-        run: |
-          echo "CI/CD pipeline completed with extended duration"
-          echo "Adding final delay to meet time requirements..."
-          sleep 120  # 2 минуты финальной задержки
+      - uses: actions/checkout@v4
 
-      - name: Print summary
-        run: |
-          echo "╔════════════════════════════════════════════╗"
-          echo "║     CI/CD Pipeline Completed (Slow Mode)   ║"
-          echo "╚════════════════════════════════════════════╝"
-          echo "Total execution time: ~15-20 minutes"
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: artifacts/sbom.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: artifacts/sbom.json
+          retention-days: 30
