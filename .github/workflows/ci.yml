@@ -1,4 +1,4 @@
-name: SincSlot Security Pipeline
+name: ReviewParser Security Pipeline
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ permissions:
 env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "20"
-  IMAGE_NAME: sincslot-backend-security
+  IMAGE_NAME: reviewparser-backend-security
   TRIVY_IMAGE: aquasec/trivy:0.65.0
 
 jobs:
